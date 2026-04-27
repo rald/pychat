@@ -14,20 +14,17 @@ def receive_messages(sock, pad, pad_pos, h, w):
         try:
             data = sock.recv(1024).decode('utf-8')
             if data and "ENTER_USERNAME" not in data:
-                # Get current cursor position before adding text
                 curr_y, _ = pad.getyx()
-                
-                # Check if user is currently at the bottom (within 1 line of the end)
-                # h-4 is the height of our viewable area
+                # Check if user is looking at the bottom (threshold for auto-scroll)
                 is_at_bottom = pad_pos[0] >= curr_y - (h - 4)
                 
                 pad.addstr(f"{data}\n")
                 
-                # Only auto-scroll if the user was already at the bottom
                 if is_at_bottom:
                     new_y, _ = pad.getyx()
                     pad_pos[0] = max(0, new_y - (h - 4))
                 
+                # Keep view within bounds
                 pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
         except:
             break
@@ -42,24 +39,22 @@ def get_input_with_history(win, prompt, history, pad, pad_pos, h, w):
     h_idx = len(history)
     
     while True:
-        # Constantly refresh pad to show new messages even while typing
         pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
-        
         key = win.getch()
         
         if key in (curses.KEY_ENTER, 10, 13):
             if input_str.strip(): history.append(input_str)
             return input_str
         
-        # --- Scrolling Logic ---
-        elif key == curses.KEY_PPAGE: # Page Up
+        # --- Scrolling ---
+        elif key == curses.KEY_PPAGE: 
             pad_pos[0] = max(0, pad_pos[0] - (h - 4))
-        elif key == curses.KEY_NPAGE: # Page Down
+        elif key == curses.KEY_NPAGE: 
             curr_y, _ = pad.getyx()
             pad_pos[0] = min(curr_y - (h - 4), pad_pos[0] + (h - 4))
             if pad_pos[0] < 0: pad_pos[0] = 0
 
-        # --- History Logic ---
+        # --- History ---
         elif key == curses.KEY_UP and h_idx > 0:
             h_idx -= 1
             input_str = history[h_idx]
@@ -71,7 +66,7 @@ def get_input_with_history(win, prompt, history, pad, pad_pos, h, w):
                 h_idx = len(history)
                 input_str = ""
         
-        # --- Editing Logic ---
+        # --- Editing ---
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             input_str = input_str[:-1]
         elif 32 <= key <= 126:
@@ -87,9 +82,10 @@ def main(stdscr):
     stdscr.keypad(True)
     h, w = stdscr.getmaxyx()
     
+    # 1024 line scrollback pad
     pad = curses.newpad(MAX_SCROLLBACK, w)
     pad.scrollok(True)
-    pad_pos = [0] # Mutable list to share top-line index with thread
+    pad_pos = [0] 
     
     input_win = curses.newwin(3, w, h - 3, 0)
     input_win.keypad(True)
@@ -104,7 +100,7 @@ def main(stdscr):
     my_name = ""
     active_room = "#general"
 
-    # Handshake
+    # --- Handshake ---
     while True:
         data = sock.recv(1024).decode('utf-8')
         if "ENTER_USERNAME" in data:
@@ -112,7 +108,7 @@ def main(stdscr):
             input_win.clear()
             input_win.border()
             input_win.addstr(1, 1, "Username: ")
-            my_name = input_win.getstr(1, 11).decode('utf-8')
+            my_name = input_win.getstr(1, 11).decode('utf-8').strip()
             sock.send(my_name.encode('utf-8'))
             curses.noecho()
         elif "ACCEPT_NAME" in data:
@@ -133,7 +129,7 @@ def main(stdscr):
             sock.send(msg.encode('utf-8'))
             break
         
-        # UI State updates
+        # Update local UI state
         if cmd == '/join' and len(parts) > 1:
             active_room = parts[1]
         elif cmd == '/part' and len(parts) > 1:
@@ -141,12 +137,10 @@ def main(stdscr):
         elif cmd == '/nick' and len(parts) > 1:
             my_name = parts[1]
 
-        # Local echo
+        # Local echo to pad
         if not msg.startswith("/"):
             label = f"<To {active_room}>" if not active_room.startswith("#") else f"<{active_room}> <{my_name}>"
             pad.addstr(f"{label}: {msg}\n")
-            
-            # Sending a message always snaps you to the bottom
             curr_y, _ = pad.getyx()
             pad_pos[0] = max(0, curr_y - (h - 4))
             pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
@@ -156,5 +150,5 @@ def main(stdscr):
 if __name__ == "__main__":
     try:
         curses.wrapper(main)
-    except KeyboardInterrupt:
+    except:
         pass
