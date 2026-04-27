@@ -2,12 +2,10 @@ import socket
 import curses
 import threading
 
-# Configuration
 HOST = '192.227.241.244'
 PORT = 14344
 
 def receive_messages(sock, msg_win):
-    """Handles incoming data from the server."""
     while True:
         try:
             data = sock.recv(1024).decode('utf-8')
@@ -15,37 +13,79 @@ def receive_messages(sock, msg_win):
                 msg_win.scrollok(True)
                 msg_win.addstr(f"{data}\n")
                 msg_win.refresh()
-        except:
-            break
+        except: break
+
+def get_input_with_history(win, prompt, history, my_name, active_room):
+    """Custom input handler supporting Up/Down arrow keys for history."""
+    win.clear()
+    win.border()
+    win.addstr(1, 1, prompt)
+    win.refresh()
+    
+    input_str = ""
+    history_idx = len(history)
+    
+    while True:
+        key = win.getch()
+        
+        if key in (curses.KEY_ENTER, 10, 13): # Enter keys
+            if input_str.strip():
+                history.append(input_str)
+            return input_str
+
+        elif key == curses.KEY_UP:
+            if history_idx > 0:
+                history_idx -= 1
+                input_str = history[history_idx]
+        
+        elif key == curses.KEY_DOWN:
+            if history_idx < len(history) - 1:
+                history_idx += 1
+                input_str = history[history_idx]
+            else:
+                history_idx = len(history)
+                input_str = ""
+
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            input_str = input_str[:-1]
+
+        elif 32 <= key <= 126: # Printable characters
+            input_str += chr(key)
+
+        # Redraw the input line
+        win.clear()
+        win.border()
+        win.addstr(1, 1, prompt + input_str)
+        win.refresh()
 
 def main(stdscr):
-    curses.echo()
+    curses.noecho() # Disable automatic echo for custom handler
+    stdscr.keypad(True)
     h, w = stdscr.getmaxyx()
-    
-    # Message window (Top) and Input window (Bottom)
     msg_win = curses.newwin(h - 3, w, 0, 0)
     input_win = curses.newwin(3, w, h - 3, 0)
+    input_win.keypad(True)
     msg_win.scrollok(True)
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect((HOST, PORT))
-    except Exception as e:
-        stdscr.addstr(f"Connection failed: {e}\nPress any key to exit.")
-        stdscr.getch()
-        return
+    sock.connect((HOST, PORT))
 
-    # --- Handshake Phase ---
+    command_history = []
     my_name = ""
+    
+    # --- Handshake ---
     while True:
         data = sock.recv(1024).decode('utf-8')
         if "ENTER_USERNAME" in data:
+            # Re-enable echo just for initial name entry
+            curses.echo()
             input_win.clear()
             input_win.border()
             input_win.addstr(1, 1, "Username: ")
             input_win.refresh()
-            name_input = input_win.getstr(1, 11).decode('utf-8')
-            sock.send(name_input.encode('utf-8'))
+            my_name = input_win.getstr(1, 11).decode('utf-8')
+            sock.send(my_name.encode('utf-8'))
+            curses.noecho()
         elif "ACCEPT_NAME" in data:
             my_name = data.split("|")[1]
             break
@@ -53,43 +93,38 @@ def main(stdscr):
             msg_win.addstr(f"{data}\n")
             msg_win.refresh()
 
-    # Background listening
     threading.Thread(target=receive_messages, args=(sock, msg_win), daemon=True).start()
 
-    active_room = "general"
+    active_room = "#general"
     while True:
-        # UI Refresh
-        input_win.clear()
-        input_win.border()
         prompt = f"[{active_room}] {my_name}> "
-        input_win.addstr(1, 1, prompt)
-        input_win.refresh()
+        msg = get_input_with_history(input_win, prompt, command_history, my_name, active_room)
         
-        # Get Message
-        msg = input_win.getstr(1, len(prompt) + 1).decode('utf-8')
         if not msg: continue
         if msg.lower() == '/quit': break
         
-        # --- Local UI Prediction ---
+        # Local state updates
         if msg.startswith("/nick "):
-            new_nick = msg.split(" ", 1)[1].strip()
-            if new_nick: my_name = new_nick 
+            parts = msg.split(" ", 1)
+            if len(parts) > 1:
+                new_nick = parts[1].strip()
+                if len(new_nick) <= 32: my_name = new_nick 
         elif msg.startswith("/join "):
             active_room = msg.split(" ", 1)[1].strip()
         elif msg.startswith("/part "):
-            parts = msg.split(" ", 1)
-            if len(parts) > 1 and parts[1].strip() == active_room:
-                active_room = "general" 
+            target = msg.split(" ", 1)[1].strip()
+            if target == active_room: active_room = "#general"
         
-        # Display own message locally if not a command
+        # Local echo
         if not msg.startswith("/"):
-            msg_win.addstr(f"<{active_room}> <{my_name}>: {msg}\n")
+            if not active_room.startswith("#"):
+                msg_win.addstr(f"<To {active_room}>: {msg}\n")
+            else:
+                msg_win.addstr(f"<{active_room}> <{my_name}>: {msg}\n")
             msg_win.refresh()
         
         sock.send(msg.encode('utf-8'))
 
 if __name__ == "__main__":
-    try:
-        curses.wrapper(main)
-    except KeyboardInterrupt:
-        pass
+    try: curses.wrapper(main)
+    except KeyboardInterrupt: pass
