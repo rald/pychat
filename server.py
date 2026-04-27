@@ -1,12 +1,13 @@
 import socket
 import threading
 
-# Updated Network Config
+# Configuration
 HOST = '192.227.241.244'
 PORT = 14344
-clients = {} 
+clients = {} # {socket: {"name": str, "rooms": set(), "active_room": str}}
 
 def broadcast(message, room, sender_sock):
+    """Sends a message to everyone subscribed to a specific room."""
     for sock, info in clients.items():
         if room in info["rooms"] and sock != sender_sock:
             try:
@@ -16,6 +17,7 @@ def broadcast(message, room, sender_sock):
 
 def handle_client(conn, addr):
     try:
+        # --- Unique Username Handshake ---
         while True:
             conn.send("ENTER_USERNAME".encode('utf-8'))
             name = conn.recv(1024).decode('utf-8').strip()
@@ -35,6 +37,7 @@ def handle_client(conn, addr):
             data = conn.recv(1024).decode('utf-8')
             if not data: break
             
+            # --- Command Handling ---
             if data.startswith("/nick "):
                 new_name = data.split(" ", 1)[1].strip()
                 if not new_name: continue
@@ -80,7 +83,23 @@ def handle_client(conn, addr):
                 room = data.split(" ", 1)[1].strip()
                 names = [info['name'] for info in clients.values() if room in info['rooms']]
                 conn.send(f"--- Users in {room}: {', '.join(names)} ---\n".encode('utf-8'))
+
+            elif data == "/help":
+                help_text = (
+                    "\n--- Available Commands ---\n"
+                    "/nick <name>      - Change your username\n"
+                    "/join <room>      - Join/Listen to a room and set it as active\n"
+                    "/part <room>      - Leave a specific room\n"
+                    "/list             - List all active rooms on the server\n"
+                    "/names <room>     - List all users in a specific room\n"
+                    "/quit             - Disconnect from the server\n"
+                    "/help             - Show this help message\n"
+                    "--------------------------\n"
+                )
+                conn.send(help_text.encode('utf-8'))
+
             else:
+                # Standard Message Broadcast
                 active_room = clients[conn]["active_room"]
                 msg = f"<{active_room}> <{clients[conn]['name']}>: {data}"
                 broadcast(msg, active_room, conn)
@@ -98,13 +117,15 @@ def handle_client(conn, addr):
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Binding to your specific IP
-    server.bind((HOST, PORT))
-    server.listen()
-    print(f"Chat Server live on {HOST}:{PORT}")
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+    try:
+        server.bind((HOST, PORT))
+        server.listen()
+        print(f"Chat Server live on {HOST}:{PORT}")
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+    except Exception as e:
+        print(f"Server error: {e}")
 
 if __name__ == "__main__":
     start_server()
