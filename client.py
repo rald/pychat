@@ -1,130 +1,160 @@
+#!/usr/bin/env python3
 import socket
 import curses
 import threading
 
+# Configuration
 HOST = '192.227.241.244'
 PORT = 14344
+MAX_SCROLLBACK = 1024
 
-def receive_messages(sock, msg_win):
+def receive_messages(sock, pad, pad_pos, h, w):
+    """Handles incoming data with intelligent auto-scroll."""
     while True:
         try:
             data = sock.recv(1024).decode('utf-8')
             if data and "ENTER_USERNAME" not in data:
-                msg_win.scrollok(True)
-                msg_win.addstr(f"{data}\n")
-                msg_win.refresh()
-        except: break
+                # Get current cursor position before adding text
+                curr_y, _ = pad.getyx()
+                
+                # Check if user is currently at the bottom (within 1 line of the end)
+                # h-4 is the height of our viewable area
+                is_at_bottom = pad_pos[0] >= curr_y - (h - 4)
+                
+                pad.addstr(f"{data}\n")
+                
+                # Only auto-scroll if the user was already at the bottom
+                if is_at_bottom:
+                    new_y, _ = pad.getyx()
+                    pad_pos[0] = max(0, new_y - (h - 4))
+                
+                pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
+        except:
+            break
 
-def get_input_with_history(win, prompt, history, my_name, active_room):
-    """Custom input handler supporting Up/Down arrow keys for history."""
+def get_input_with_history(win, prompt, history, pad, pad_pos, h, w):
     win.clear()
     win.border()
     win.addstr(1, 1, prompt)
     win.refresh()
     
     input_str = ""
-    history_idx = len(history)
+    h_idx = len(history)
     
     while True:
+        # Constantly refresh pad to show new messages even while typing
+        pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
+        
         key = win.getch()
         
-        if key in (curses.KEY_ENTER, 10, 13): # Enter keys
-            if input_str.strip():
-                history.append(input_str)
+        if key in (curses.KEY_ENTER, 10, 13):
+            if input_str.strip(): history.append(input_str)
             return input_str
-
-        elif key == curses.KEY_UP:
-            if history_idx > 0:
-                history_idx -= 1
-                input_str = history[history_idx]
         
-        elif key == curses.KEY_DOWN:
-            if history_idx < len(history) - 1:
-                history_idx += 1
-                input_str = history[history_idx]
-            else:
-                history_idx = len(history)
-                input_str = ""
+        # --- Scrolling Logic ---
+        elif key == curses.KEY_PPAGE: # Page Up
+            pad_pos[0] = max(0, pad_pos[0] - (h - 4))
+        elif key == curses.KEY_NPAGE: # Page Down
+            curr_y, _ = pad.getyx()
+            pad_pos[0] = min(curr_y - (h - 4), pad_pos[0] + (h - 4))
+            if pad_pos[0] < 0: pad_pos[0] = 0
 
+        # --- History Logic ---
+        elif key == curses.KEY_UP and h_idx > 0:
+            h_idx -= 1
+            input_str = history[h_idx]
+        elif key == curses.KEY_DOWN:
+            if h_idx < len(history) - 1:
+                h_idx += 1
+                input_str = history[h_idx]
+            else:
+                h_idx = len(history)
+                input_str = ""
+        
+        # --- Editing Logic ---
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             input_str = input_str[:-1]
-
-        elif 32 <= key <= 126: # Printable characters
+        elif 32 <= key <= 126:
             input_str += chr(key)
 
-        # Redraw the input line
         win.clear()
         win.border()
         win.addstr(1, 1, prompt + input_str)
         win.refresh()
 
 def main(stdscr):
-    curses.noecho() # Disable automatic echo for custom handler
+    curses.noecho()
     stdscr.keypad(True)
     h, w = stdscr.getmaxyx()
-    msg_win = curses.newwin(h - 3, w, 0, 0)
+    
+    pad = curses.newpad(MAX_SCROLLBACK, w)
+    pad.scrollok(True)
+    pad_pos = [0] # Mutable list to share top-line index with thread
+    
     input_win = curses.newwin(3, w, h - 3, 0)
     input_win.keypad(True)
-    msg_win.scrollok(True)
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((HOST, PORT))
+    try:
+        sock.connect((HOST, PORT))
+    except:
+        return
 
-    command_history = []
+    history = []
     my_name = ""
-    
-    # --- Handshake ---
+    active_room = "#general"
+
+    # Handshake
     while True:
         data = sock.recv(1024).decode('utf-8')
         if "ENTER_USERNAME" in data:
-            # Re-enable echo just for initial name entry
             curses.echo()
             input_win.clear()
             input_win.border()
             input_win.addstr(1, 1, "Username: ")
-            input_win.refresh()
             my_name = input_win.getstr(1, 11).decode('utf-8')
             sock.send(my_name.encode('utf-8'))
             curses.noecho()
         elif "ACCEPT_NAME" in data:
             my_name = data.split("|")[1]
             break
-        else:
-            msg_win.addstr(f"{data}\n")
-            msg_win.refresh()
 
-    threading.Thread(target=receive_messages, args=(sock, msg_win), daemon=True).start()
+    threading.Thread(target=receive_messages, args=(sock, pad, pad_pos, h, w), daemon=True).start()
 
-    active_room = "#general"
     while True:
         prompt = f"[{active_room}] {my_name}> "
-        msg = get_input_with_history(input_win, prompt, command_history, my_name, active_room)
-        
+        msg = get_input_with_history(input_win, prompt, history, pad, pad_pos, h, w)
         if not msg: continue
-        if msg.lower() == '/quit': break
         
-        # Local state updates
-        if msg.startswith("/nick "):
-            parts = msg.split(" ", 1)
-            if len(parts) > 1:
-                new_nick = parts[1].strip()
-                if len(new_nick) <= 32: my_name = new_nick 
-        elif msg.startswith("/join "):
-            active_room = msg.split(" ", 1)[1].strip()
-        elif msg.startswith("/part "):
-            target = msg.split(" ", 1)[1].strip()
-            if target == active_room: active_room = "#general"
+        parts = msg.split()
+        cmd = parts[0].lower()
+
+        if cmd == '/quit':
+            sock.send(msg.encode('utf-8'))
+            break
         
+        # UI State updates
+        if cmd == '/join' and len(parts) > 1:
+            active_room = parts[1]
+        elif cmd == '/part' and len(parts) > 1:
+            if parts[1] == active_room: active_room = "#general"
+        elif cmd == '/nick' and len(parts) > 1:
+            my_name = parts[1]
+
         # Local echo
         if not msg.startswith("/"):
-            if not active_room.startswith("#"):
-                msg_win.addstr(f"<To {active_room}>: {msg}\n")
-            else:
-                msg_win.addstr(f"<{active_room}> <{my_name}>: {msg}\n")
-            msg_win.refresh()
+            label = f"<To {active_room}>" if not active_room.startswith("#") else f"<{active_room}> <{my_name}>"
+            pad.addstr(f"{label}: {msg}\n")
+            
+            # Sending a message always snaps you to the bottom
+            curr_y, _ = pad.getyx()
+            pad_pos[0] = max(0, curr_y - (h - 4))
+            pad.refresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
         
         sock.send(msg.encode('utf-8'))
 
 if __name__ == "__main__":
-    try: curses.wrapper(main)
-    except KeyboardInterrupt: pass
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        pass
