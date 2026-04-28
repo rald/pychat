@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import socket, curses, threading, time
 
+# Your restored IP address
 HOST, PORT = '192.227.241.244', 14344
 MAX_SCROLLBACK = 1024
 MAX_INPUT_LENGTH = 512
@@ -19,14 +20,14 @@ def receive_messages(sock, pad, pad_pos, h, w, state):
             for data in raw_data.split('\n'):
                 if not data: continue
                 
-                # Handle Heartbeat
+                # Heartbeat processing
                 if data.startswith("PING|"):
                     ts = float(data.split("|")[1])
                     state.latency = int((time.time() - ts) * 1000)
                     sock.send(f"PONG|{ts}\n".encode('utf-8'))
                     continue
                 
-                # Handle Identity/Room Changes
+                # Room/Identity change processing
                 if data.startswith("NICK_SUCCESS|") or data.startswith("JOIN_SUCCESS|"):
                     val = data.split("|")[1].strip()
                     if data.startswith("NICK"): state.name = val
@@ -34,7 +35,7 @@ def receive_messages(sock, pad, pad_pos, h, w, state):
                     state.prompt = f"[{state.room}] {state.name}> "
                     continue
                 
-                # Filter out handshake prompts from main chat
+                # Main chat output (filters out handshake prompts)
                 if "ENTER_USERNAME" not in data:
                     curr_y, _ = pad.getyx()
                     at_bottom = pad_pos[0] >= curr_y - (h - 4)
@@ -57,6 +58,7 @@ def get_input(win, state, history, pad, pad_pos, h, w):
         pad.noutrefresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
         win.erase(); win.border()
         win.addstr(1, 1, state.prompt + display_part)
+        
         if state.latency > 0:
             win.addstr(2, w - 10, f" {state.latency}ms ")
         
@@ -104,14 +106,17 @@ def main(stdscr):
     input_win = curses.newwin(3, w, h - 3, 0); input_win.keypad(True)
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try: sock.connect((HOST, PORT))
-    except: return
+    try: 
+        sock.connect((HOST, PORT))
+    except Exception as e:
+        stdscr.addstr(0, 0, f"CONNECTION FAILED: {e}")
+        stdscr.addstr(1, 0, f"Host: {HOST}:{PORT}")
+        stdscr.refresh(); time.sleep(3); return
 
-    # --- Robust Handshake Loop ---
+    # --- Secure Handshake Loop ---
     name = ""
     while True:
         data = sock.recv(1024).decode('utf-8').strip()
-        
         if "ENTER_USERNAME" in data:
             input_win.clear(); input_win.border()
             input_win.addstr(1, 1, "Username: ")
@@ -119,13 +124,10 @@ def main(stdscr):
             attempt = input_win.getstr(1, 11).decode('utf-8').strip()[:32]
             curses.noecho()
             sock.send(f"{attempt}\n".encode('utf-8'))
-            
         elif "ACCEPT_NAME|" in data:
             name = data.split("|")[1].strip()
-            break # Success!
-            
+            break
         elif "[!] ERROR" in data:
-            # Show the error in the input window specifically
             input_win.addstr(2, 1, data[:w-2], curses.A_REVERSE)
             input_win.refresh()
             time.sleep(1.5)
@@ -137,15 +139,20 @@ def main(stdscr):
         msg = get_input(input_win, state, history, pad, pad_pos, h, w)
         if not msg: continue
         
-        # Local echo for messages (Sent vs Received)
+        # Local Echo and UI adjustment
         if not msg.startswith("/"):
-            lbl = f"<{state.room}> <{state.name}>" if state.room.startswith("#") else f"<To {state.room}>"
-            pad.addstr(f"{lbl}: {msg}\n")
+            label = f"<{state.room}> <{state.name}>" if state.room.startswith("#") else f"<To {state.room}>"
+            pad.addstr(f"{label}: {msg}\n")
             cy, _ = pad.getyx()
             pad_pos[0] = max(0, cy - (h - 4))
             
         sock.send(f"{msg}\n".encode('utf-8'))
-        if msg.startswith("/quit"): break
+        if msg.startswith("/quit"):
+            stdscr.clear()
+            stdscr.addstr(h//2, (w//2)-10, "Exiting Chat...")
+            stdscr.refresh()
+            time.sleep(1)
+            break
 
 if __name__ == "__main__":
     try: curses.wrapper(main)
