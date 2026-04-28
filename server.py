@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import socket, threading, re, time
 
-# If this specific IP fails to bind, use HOST = '0.0.0.0'
 HOST, PORT = '192.227.241.244', 14344
 TIMEOUT_LIMIT = 60
 clients = {}
@@ -55,18 +54,22 @@ def handle_client(conn, addr):
             raw = conn.recv(1024).decode('utf-8')
             if not raw: return
             name = raw.strip()
-            if is_valid_id(name) and not any(i['name'].lower() == name.lower() for i in clients.values()):
-                clients[conn] = {
-                    "name": name, 
-                    "rooms": {"#lobby"}, 
-                    "active_room": "#lobby", 
-                    "last_pong": time.time()
-                }
-                conn.send(f"ACCEPT_NAME|{name}\n".encode('utf-8'))
-                broadcast(f"*** {name} joined #lobby ***", "#lobby")
-                threading.Thread(target=heartbeat, args=(conn,), daemon=True).start()
-                break
-            conn.send("[!] ERROR: Name invalid or taken.\n".encode('utf-8'))
+            if is_valid_id(name):
+                if not any(i['name'].lower() == name.lower() for i in clients.values()):
+                    clients[conn] = {
+                        "name": name, 
+                        "rooms": {"#lobby"}, 
+                        "active_room": "#lobby", 
+                        "last_pong": time.time()
+                    }
+                    conn.send(f"ACCEPT_NAME|{name}\n".encode('utf-8'))
+                    broadcast(f"*** {name} joined #lobby ***", "#lobby")
+                    threading.Thread(target=heartbeat, args=(conn,), daemon=True).start()
+                    break
+                else:
+                    conn.send("[!] ERROR: Username is already taken.\n".encode('utf-8'))
+            else:
+                conn.send("[!] ERROR: Name must be 1-32 alphanumeric characters.\n".encode('utf-8'))
 
         # --- Main Loop ---
         while True:
@@ -86,55 +89,87 @@ def handle_client(conn, addr):
                 
                 if cmd == "/quit":
                     break
+                
                 elif cmd == "/help":
                     conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
+                
                 elif cmd == "/list":
                     room_counts = {}
                     for c_info in clients.values():
                         for r in c_info["rooms"]:
                             if r.startswith("#"):
                                 room_counts[r] = room_counts.get(r, 0) + 1
-                    list_str = "\n".join([f"{r} ({count} users)" for r, count in room_counts.items()])
-                    conn.send(f"--- Active Channels ---\n{list_str if list_str else 'No public channels'}\n-----------------------\n".encode('utf-8'))
+                    if not room_counts:
+                        conn.send("[i] No active public channels found.\n".encode('utf-8'))
+                    else:
+                        list_str = "\n".join([f"  {r} ({count} users)" for r, count in room_counts.items()])
+                        conn.send(f"--- Active Channels ---\n{list_str}\n-----------------------\n".encode('utf-8'))
+
                 elif cmd == "/names":
                     target = arg if arg else clients[conn]["active_room"]
                     u_list = [i["name"] for i in clients.values() if target in i["rooms"]]
                     if u_list:
-                        res = f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n---------------------------\n"
+                        res = f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n".encode('utf-8')
+                        conn.send(res)
                     else:
-                        res = f"[!] ERROR: Room {target} not found.\n"
-                    conn.send(res.encode('utf-8'))
+                        conn.send(f"[!] ERROR: Room or user '{target}' is not active.\n".encode('utf-8'))
+
                 elif cmd == "/part":
                     target = arg if arg else clients[conn]["active_room"]
                     if target == "#lobby":
-                        conn.send("[!] ERROR: You cannot leave #lobby.\n".encode('utf-8'))
+                        conn.send("[!] ERROR: #lobby is the default room; you cannot leave it.\n".encode('utf-8'))
                     elif target in clients[conn]["rooms"]:
                         clients[conn]["rooms"].remove(target)
                         broadcast(f"*** {clients[conn]['name']} left {target} ***", target)
                         if clients[conn]["active_room"] == target:
                             clients[conn]["active_room"] = "#lobby"
-                            conn.send(f"JOIN_SUCCESS|#lobby\n[i] Switched to #lobby\n".encode('utf-8'))
-                        conn.send(f"[i] You left {target}\n".encode('utf-8'))
-                elif cmd == "/nick" and arg:
-                    if is_valid_id(arg) and not any(i['name'].lower() == arg.lower() for i in clients.values()):
+                            conn.send(f"JOIN_SUCCESS|#lobby\n[i] Left {target}. Back in #lobby.\n".encode('utf-8'))
+                        else:
+                            conn.send(f"[i] Successfully left {target}.\n".encode('utf-8'))
+                    else:
+                        conn.send(f"[!] ERROR: You are not a member of '{target}'.\n".encode('utf-8'))
+
+                elif cmd == "/nick":
+                    if not arg:
+                        conn.send("[!] ERROR: Usage: /nick <new_name>\n".encode('utf-8'))
+                    elif not is_valid_id(arg):
+                        conn.send("[!] ERROR: Invalid characters in nickname.\n".encode('utf-8'))
+                    elif any(i['name'].lower() == arg.lower() for i in clients.values()):
+                        conn.send(f"[!] ERROR: The name '{arg}' is already taken.\n".encode('utf-8'))
+                    else:
                         old = clients[conn]["name"]
                         clients[conn]["name"] = arg
-                        conn.send(f"NICK_SUCCESS|{arg}\n".encode('utf-8'))
-                        for r in clients[conn]["rooms"]: broadcast(f"*** {old} is now known as {arg} ***", r)
-                elif cmd == "/join" and arg:
-                    clients[conn]["rooms"].add(arg)
-                    clients[conn]["active_room"] = arg
-                    conn.send(f"JOIN_SUCCESS|{arg}\n".encode('utf-8'))
-                    if arg.startswith("#"): broadcast(f"*** {clients[conn]['name']} joined {arg} ***", arg)
+                        conn.send(f"NICK_SUCCESS|{arg}\n[i] Your name is now {arg}.\n".encode('utf-8'))
+                        for r in clients[conn]["rooms"]: 
+                            broadcast(f"*** {old} is now known as {arg} ***", r)
+
+                elif cmd == "/join":
+                    if not arg:
+                        conn.send("[!] ERROR: Usage: /join <#room|user>\n".encode('utf-8'))
+                    elif arg == clients[conn]["active_room"]:
+                        conn.send(f"[i] You are already in {arg}.\n".encode('utf-8'))
+                    else:
+                        clients[conn]["rooms"].add(arg)
+                        clients[conn]["active_room"] = arg
+                        conn.send(f"JOIN_SUCCESS|{arg}\n[i] Switched to {arg}\n".encode('utf-8'))
+                        if arg.startswith("#"): 
+                            broadcast(f"*** {clients[conn]['name']} joined {arg} ***", arg)
+                
+                else:
+                    conn.send(f"[!] ERROR: Unknown command '{cmd}'. Type /help for assistance.\n".encode('utf-8'))
             else:
+                # Normal Chat Message
                 room = clients[conn]["active_room"]
                 broadcast(f"<{room}> <{clients[conn]['name']}>: {data}", room, conn)
-    except: pass
+
+    except Exception as e:
+        print(f"Error handling client: {e}")
     finally:
         if conn in clients:
             u = clients[conn]
             reason = "timed out" if (time.time() - u["last_pong"] > TIMEOUT_LIMIT) else "quit"
-            for r in u["rooms"]: broadcast(f"*** {u['name']} {reason} ***", r)
+            for r in u["rooms"]: 
+                broadcast(f"*** {u['name']} {reason} ***", r)
             del clients[conn]
         conn.close()
 
@@ -145,7 +180,7 @@ def start_server():
     try:
         s.bind((HOST, PORT))
         s.listen(5)
-        print(f"[+] Server LIVE.")
+        print(f"[+] Server LIVE. Ready for connections.")
     except Exception as e:
         print(f"[!] BIND ERROR: {e}")
         return
