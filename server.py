@@ -14,6 +14,7 @@ HELP_TEXT = """
 /part [#room]      - Leave current or specified channel
 /list              - List all active public channels
 /names [#room]     - List users in current or specified room
+/whois <username>  - See which channels a user is in
 /nick <new_name>   - Change your display name
 /help              - Display this menu
 /quit [reason]     - Disconnect from the server
@@ -38,9 +39,6 @@ def broadcast(msg, room, sender_sock=None):
             if sender_sock != target_sock:
                 try: sender_sock.send(formatted_msg)
                 except: pass
-        else:
-            try: sender_sock.send(f"[!] ERROR: User '{room}' is offline.\n".encode('utf-8'))
-            except: pass
         return
     for sock, info in list(clients.items()):
         if room in info["rooms"] and sock != sender_sock:
@@ -84,21 +82,32 @@ def handle_client(conn, addr):
             if data.startswith("/"):
                 parts = data.split(" ", 1)
                 cmd, arg = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
-                if cmd == "/help": conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
+                
+                if cmd == "/help":
+                    conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
                 elif cmd == "/quit":
+                    # ONLY set the reason here. Do NOT broadcast.
                     if arg: clients[conn]["quit_reason"] = f" ({arg})"
-                    break
+                    break 
                 elif cmd == "/list":
                     room_counts = {}
                     for c_info in clients.values():
                         for r in c_info["rooms"]:
                             if r.startswith("#"): room_counts[r] = room_counts.get(r, 0) + 1
-                    list_str = "\n".join([f"  {r} ({count} users)" for r, count in room_counts.items()])
-                    conn.send(f"--- Active Channels ---\n{list_str if list_str else 'None'}\n".encode('utf-8'))
+                    l_str = "\n".join([f"  {r} ({cnt} users)" for r, cnt in room_counts.items()])
+                    conn.send(f"--- Active Channels ---\n{l_str if l_str else 'None'}\n".encode('utf-8'))
                 elif cmd == "/names":
                     target = arg if arg else clients[conn]["active_room"]
                     u_list = [i["name"] for i in clients.values() if target in i["rooms"]]
                     if u_list: conn.send(f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n".encode('utf-8'))
+                elif cmd == "/whois" and arg:
+                    target_info = next((info for info in clients.values() if info["name"].lower() == arg.lower()), None)
+                    if target_info:
+                        channels = [r for r in target_info["rooms"] if r.startswith("#")]
+                        chan_str = ", ".join(channels) if channels else "No public channels"
+                        response = f"--- WHOIS: {target_info['name']} ---\n[i] Public Channels: {chan_str}\n[i] Active View: {target_info['active_room']}\n"
+                        conn.send(response.encode('utf-8'))
+                    else: conn.send(f"[!] ERROR: User '{arg}' not found.\n".encode('utf-8'))
                 elif cmd == "/nick" and arg:
                     if is_valid_id(arg) and not any(i['name'].lower() == arg.lower() for i in clients.values()):
                         old = clients[conn]["name"]; clients[conn]["name"] = arg
@@ -114,9 +123,11 @@ def handle_client(conn, addr):
                             if is_chan: broadcast(f"*** {clients[conn]['name']} joined {arg} ***", arg)
                 elif cmd == "/part":
                     target = arg if arg else clients[conn]["active_room"]
-                    if target != "#lobby" and target in clients[conn]["rooms"]:
-                        clients[conn]["rooms"].remove(target)
+                    if target == "#lobby":
+                        conn.send("[!] ERROR: You cannot leave #lobby.\n".encode('utf-8'))
+                    elif target in clients[conn]["rooms"]:
                         broadcast(f"*** {clients[conn]['name']} left {target} ***", target)
+                        clients[conn]["rooms"].remove(target)
                         if clients[conn]["active_room"] == target:
                             clients[conn]["active_room"] = "#lobby"
                             conn.send(f"JOIN_SUCCESS|#lobby\n".encode('utf-8'))
@@ -126,20 +137,27 @@ def handle_client(conn, addr):
                 else: broadcast(f"[PM from {sender}]: {data}", room, conn)
     except: pass
     finally:
+        # THE SINGLE SOURCE OF TRUTH FOR DEPARTURE
         if conn in clients:
             u = clients[conn]
             reason = u.get("quit_reason", "")
-            if not reason and (time.time() - u["last_pong"] > TIMEOUT_LIMIT): reason = " (timed out)"
+            # Check for timeout if no manual quit reason was provided
+            if not reason and (time.time() - u["last_pong"] > TIMEOUT_LIMIT): 
+                reason = " (timed out)"
+            
             for r in u["rooms"]: 
-                if r.startswith("#"): broadcast(f"*** {u['name']} quit{reason} ***", r)
+                if r.startswith("#"): 
+                    broadcast(f"*** {u['name']} quit{reason} ***", r)
             del clients[conn]
         conn.close()
 
 def start_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try: s.bind((HOST, PORT)); s.listen(5)
-    except: s.bind(('0.0.0.0', PORT)); s.listen(5)
+    try: s.bind((HOST, PORT))
+    except: s.bind(('0.0.0.0', PORT))
+    s.listen(5)
+    print(f"[*] BIBLY Server Live")
     while True:
         c, a = s.accept()
         threading.Thread(target=handle_client, args=(c, a), daemon=True).start()
