@@ -7,9 +7,9 @@ clients = {}
 
 # Complete Help Menu
 HELP_TEXT = """
-==================================================
-           GEMINI CHAT - COMMAND LIST
-==================================================
+=====================================================
+                   COMMAND LIST
+=====================================================
 /join <#room>      - Join or switch to a channel
 /join <username>   - Start a private chat with a user
 /nick <new_name>   - Change your display name
@@ -20,7 +20,7 @@ SHORTCUTS:
 [HOME] / [END]     - Jump to start/end of input
 [PG_UP] / [PG_DN]  - Scroll chat history
 [LEFT] / [RIGHT]   - Navigate through input text
-=================================================="""
+====================================================="""
 
 def is_valid_id(name):
     return 1 <= len(name) <= 32 and re.match(r"^[A-Za-z0-9_]+$", name)
