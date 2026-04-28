@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import socket, threading, re, time
 
-# Use '0.0.0.0' if the specific IP fails to bind on your local machine
+# If this specific IP fails to bind, use HOST = '0.0.0.0'
 HOST, PORT = '192.227.241.244', 14344
 TIMEOUT_LIMIT = 60
-clients = {} 
+clients = {}
 
 HELP_TEXT = """
 ============================================================
@@ -20,6 +20,7 @@ HELP_TEXT = """
 
 SHORTCUTS:
 [UP] / [DOWN]      - Cycle through input history
+[LEFT] / [RIGHT]   - Navigate through input text
 [HOME] / [END]     - Jump to start/end of input
 [PG_UP] / [PG_DN]  - Scroll chat history
 ============================================================"""
@@ -48,7 +49,7 @@ def heartbeat(conn):
 
 def handle_client(conn, addr):
     try:
-        # Handshake
+        # --- Handshake ---
         while True:
             conn.send("ENTER_USERNAME\n".encode('utf-8'))
             raw = conn.recv(1024).decode('utf-8')
@@ -67,7 +68,7 @@ def handle_client(conn, addr):
                 break
             conn.send("[!] ERROR: Name invalid or taken.\n".encode('utf-8'))
 
-        # Main Loop
+        # --- Main Loop ---
         while True:
             raw = conn.recv(1024).decode('utf-8')
             if not raw: break
@@ -97,9 +98,9 @@ def handle_client(conn, addr):
                     conn.send(f"--- Active Channels ---\n{list_str if list_str else 'No public channels'}\n-----------------------\n".encode('utf-8'))
                 elif cmd == "/names":
                     target = arg if arg else clients[conn]["active_room"]
-                    user_list = [info["name"] for info in clients.values() if target in info["rooms"]]
-                    if user_list:
-                        res = f"--- Users in {target} ({len(user_list)}) ---\n{', '.join(user_list)}\n---------------------------\n"
+                    u_list = [i["name"] for i in clients.values() if target in i["rooms"]]
+                    if u_list:
+                        res = f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n---------------------------\n"
                     else:
                         res = f"[!] ERROR: Room {target} not found.\n"
                     conn.send(res.encode('utf-8'))
@@ -138,7 +139,7 @@ def handle_client(conn, addr):
         conn.close()
 
 def start_server():
-    print(f"[*] BIBLY Server starting on {HOST}:{PORT}...")
+    print(f"[*] Starting BIBLY Server on {HOST}:{PORT}...")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
