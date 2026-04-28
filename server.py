@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import socket, threading, re, time
 
-# Config - Use '0.0.0.0' to bind to all local IPs if this specific IP fails
 HOST, PORT = '192.227.241.244', 14344
 TIMEOUT_LIMIT = 60
 clients = {}
 
+# Full HELP_TEXT restored
 HELP_TEXT = """
 ============================================================
                  BIBLY CHAT - COMMAND LIST
@@ -39,11 +39,7 @@ def broadcast(msg, room, sender_sock=None):
             if sender_sock != target_sock:
                 try: sender_sock.send(formatted_msg)
                 except: pass
-        else:
-            try: sender_sock.send(f"[!] ERROR: User '{room}' is offline.\n".encode('utf-8'))
-            except: pass
         return
-
     for sock, info in list(clients.items()):
         if room in info["rooms"] and sock != sender_sock:
             try: sock.send(formatted_msg)
@@ -54,51 +50,33 @@ def heartbeat(conn):
         while True:
             time.sleep(30)
             if conn not in clients: break
-            silence = time.time() - clients[conn]["last_pong"]
-            if silence > TIMEOUT_LIMIT:
-                conn.close()
-                break
+            if time.time() - clients[conn]["last_pong"] > TIMEOUT_LIMIT:
+                conn.close(); break
             conn.send(f"PING|{time.time()}\n".encode('utf-8'))
     except: pass
 
 def handle_client(conn, addr):
     try:
-        # --- PHASE 1: LOGIN HANDSHAKE ---
-        # This loop prevents the client from entering the chat until name is valid
+        # --- PHASE 1: HANDSHAKE ---
         while True:
             conn.send("ENTER_USERNAME\n".encode('utf-8'))
             raw = conn.recv(1024).decode('utf-8')
             if not raw: return
             name = raw.strip()
-            
-            if not is_valid_id(name):
-                conn.send("[!] ERROR: Name must be 1-32 alphanumeric characters.\n".encode('utf-8'))
-                continue # Re-prompts for ENTER_USERNAME
-                
-            # Case-insensitive duplicate check
-            if any(i['name'].lower() == name.lower() for i in clients.values()):
-                conn.send(f"[!] ERROR: Name '{name}' is already taken.\n".encode('utf-8'))
-                continue # Re-prompts for ENTER_USERNAME
-            
-            # SUCCESS: Register client
-            clients[conn] = {
-                "name": name, 
-                "rooms": {"#lobby"}, 
-                "active_room": "#lobby", 
-                "last_pong": time.time()
-            }
-            conn.send(f"ACCEPT_NAME|{name}\n".encode('utf-8'))
-            broadcast(f"*** {name} joined #lobby ***", "#lobby")
-            threading.Thread(target=heartbeat, args=(conn,), daemon=True).start()
-            break
+            if is_valid_id(name) and not any(i['name'].lower() == name.lower() for i in clients.values()):
+                clients[conn] = {"name": name, "rooms": {"#lobby"}, "active_room": "#lobby", "last_pong": time.time()}
+                conn.send(f"ACCEPT_NAME|{name}\n".encode('utf-8'))
+                broadcast(f"*** {name} joined #lobby ***", "#lobby")
+                threading.Thread(target=heartbeat, args=(conn,), daemon=True).start()
+                break
+            conn.send("[!] ERROR: Name taken or invalid.\n".encode('utf-8'))
 
-        # --- PHASE 2: MAIN CHAT LOOP ---
+        # --- PHASE 2: COMMAND LOOP ---
         while True:
             raw = conn.recv(1024).decode('utf-8')
             if not raw: break
             data = raw.strip()
             if not data: continue
-
             if data.startswith("PONG|"):
                 if conn in clients: clients[conn]["last_pong"] = time.time()
                 continue
@@ -108,8 +86,13 @@ def handle_client(conn, addr):
                 cmd = parts[0].lower()
                 arg = parts[1].strip() if len(parts) > 1 else ""
                 
-                if cmd == "/quit": break
-                elif cmd == "/help": conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
+                # RESTORED HELP COMMAND
+                if cmd == "/help":
+                    conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
+                
+                elif cmd == "/quit":
+                    break
+                
                 elif cmd == "/list":
                     room_counts = {}
                     for c_info in clients.values():
@@ -117,41 +100,40 @@ def handle_client(conn, addr):
                             if r.startswith("#"): room_counts[r] = room_counts.get(r, 0) + 1
                     list_str = "\n".join([f"  {r} ({count} users)" for r, count in room_counts.items()])
                     conn.send(f"--- Active Channels ---\n{list_str if list_str else 'No public channels'}\n-----------------------\n".encode('utf-8'))
+
                 elif cmd == "/names":
                     target = arg if arg else clients[conn]["active_room"]
                     u_list = [i["name"] for i in clients.values() if target in i["rooms"]]
                     if u_list: conn.send(f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n".encode('utf-8'))
                     else: conn.send(f"[!] ERROR: '{target}' not found.\n".encode('utf-8'))
-                elif cmd == "/part":
-                    target = arg if arg else clients[conn]["active_room"]
-                    if target == "#lobby": conn.send("[!] ERROR: You cannot leave #lobby.\n".encode('utf-8'))
-                    elif target in clients[conn]["rooms"]:
-                        clients[conn]["rooms"].remove(target)
-                        broadcast(f"*** {clients[conn]['name']} left {target} ***", target)
-                        if clients[conn]["active_room"] == target:
-                            clients[conn]["active_room"] = "#lobby"
-                            conn.send(f"JOIN_SUCCESS|#lobby\n[i] Switched back to #lobby\n".encode('utf-8'))
-                        else: conn.send(f"[i] You left {target}\n".encode('utf-8'))
-                    else: conn.send(f"[!] ERROR: You are not in {target}\n".encode('utf-8'))
-                elif cmd == "/nick":
-                    if not arg or not is_valid_id(arg): conn.send("[!] ERROR: Invalid name.\n".encode('utf-8'))
-                    elif any(i['name'].lower() == arg.lower() for i in clients.values()): conn.send(f"[!] ERROR: Name taken.\n".encode('utf-8'))
-                    else:
-                        old = clients[conn]["name"]; clients[conn]["name"] = arg
-                        conn.send(f"NICK_SUCCESS|{arg}\n[i] Name changed to {arg}.\n".encode('utf-8'))
-                        for r in clients[conn]["rooms"]: broadcast(f"*** {old} is now known as {arg} ***", r)
-                elif cmd == "/join":
-                    if not arg: conn.send("[!] ERROR: Usage: /join <#room|user>\n".encode('utf-8'))
-                    elif arg == clients[conn]["name"]: conn.send("[!] ERROR: Cannot PM yourself.\n".encode('utf-8'))
-                    else:
+
+                elif cmd == "/join" and arg:
+                    if arg != clients[conn]["name"]:
                         is_chan = arg.startswith("#")
                         exists = any(i['name'].lower() == arg.lower() for i in clients.values())
                         if is_chan or exists:
                             clients[conn]["rooms"].add(arg); clients[conn]["active_room"] = arg
                             conn.send(f"JOIN_SUCCESS|{arg}\n[i] Switched to {arg}\n".encode('utf-8'))
                             if is_chan: broadcast(f"*** {clients[conn]['name']} joined {arg} ***", arg)
-                        else: conn.send(f"[!] ERROR: User '{arg}' offline or invalid channel.\n".encode('utf-8'))
-                else: conn.send(f"[!] ERROR: Unknown command '{cmd}'.\n".encode('utf-8'))
+                        else: conn.send(f"[!] ERROR: {arg} not found.\n".encode('utf-8'))
+                
+                elif cmd == "/part":
+                    target = arg if arg else clients[conn]["active_room"]
+                    if target == "#lobby": conn.send("[!] ERROR: Cannot leave #lobby.\n".encode('utf-8'))
+                    elif target in clients[conn]["rooms"]:
+                        clients[conn]["rooms"].remove(target)
+                        broadcast(f"*** {clients[conn]['name']} left {target} ***", target)
+                        if clients[conn]["active_room"] == target:
+                            clients[conn]["active_room"] = "#lobby"
+                            conn.send(f"JOIN_SUCCESS|#lobby\n[i] Back in #lobby.\n".encode('utf-8'))
+                    else: conn.send(f"[!] ERROR: Not in {target}.\n".encode('utf-8'))
+
+                elif cmd == "/nick" and arg:
+                    if is_valid_id(arg) and not any(i['name'].lower() == arg.lower() for i in clients.values()):
+                        old = clients[conn]["name"]; clients[conn]["name"] = arg
+                        conn.send(f"NICK_SUCCESS|{arg}\n[i] Now known as {arg}.\n".encode('utf-8'))
+                        for r in clients[conn]["rooms"]: broadcast(f"*** {old} is now {arg} ***", r)
+                    else: conn.send("[!] ERROR: Name taken or invalid.\n".encode('utf-8'))
             else:
                 room = clients[conn]["active_room"]
                 sender = clients[conn]["name"]
@@ -167,14 +149,12 @@ def handle_client(conn, addr):
         conn.close()
 
 def start_server():
-    print(f"[*] Starting BIBLY Server on {HOST}:{PORT}...")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((HOST, PORT)); s.listen(5)
-        print(f"[+] Server LIVE. (Save Point: Handshake Loop Fixed)")
-    except Exception as e:
-        print(f"[!] BIND ERROR: {e}"); return
+        print(f"[*] Server LIVE on {PORT} with /help restored.")
+    except Exception as e: print(f"BIND ERROR: {e}"); return
     while True:
         c, a = s.accept()
         threading.Thread(target=handle_client, args=(c, a), daemon=True).start()

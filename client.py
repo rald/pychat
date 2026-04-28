@@ -1,121 +1,163 @@
 #!/usr/bin/env python3
-import socket, curses, threading, time
+import socket, threading, re, time
 
 HOST, PORT = '192.227.241.244', 14344
-MAX_SCROLLBACK = 1024
-MAX_INPUT_LENGTH = 512
+TIMEOUT_LIMIT = 60
+clients = {}
 
-class UIState:
-    def __init__(self, name, room):
-        self.name, self.room = name, room
-        self.prompt = f"[{room}] {name}> "
-        self.latency = 0
+# Full HELP_TEXT restored
+HELP_TEXT = """
+============================================================
+                 BIBLY CHAT - COMMAND LIST
+============================================================
+/join <#room>      - Join or switch to a channel
+/join <username>   - Start a private chat with a user
+/part [#room]      - Leave current or specified channel
+/list              - List all active public channels
+/names [#room]     - List users in current or specified room
+/nick <new_name>   - Change your display name
+/help              - Display this menu
+/quit [reason]     - Disconnect from the server
 
-def receive_messages(sock, pad, pad_pos, h, w, state):
+SHORTCUTS:
+[UP] / [DOWN]      - Cycle through input history
+[LEFT] / [RIGHT]   - Navigate through input text
+[HOME] / [END]     - Jump to start/end of input
+[PG_UP] / [PG_DN]  - Scroll chat history
+============================================================"""
+
+def is_valid_id(name):
+    return 1 <= len(name) <= 32 and re.match(r"^[A-Za-z0-9_]+$", name)
+
+def broadcast(msg, room, sender_sock=None):
+    formatted_msg = f"{msg}\n".encode('utf-8')
+    if not room.startswith("#"):
+        target_sock = next((s for s, info in clients.items() if info["name"].lower() == room.lower()), None)
+        if target_sock:
+            try: target_sock.send(formatted_msg)
+            except: pass
+            if sender_sock != target_sock:
+                try: sender_sock.send(formatted_msg)
+                except: pass
+        return
+    for sock, info in list(clients.items()):
+        if room in info["rooms"] and sock != sender_sock:
+            try: sock.send(formatted_msg)
+            except: pass
+
+def heartbeat(conn):
+    try:
+        while True:
+            time.sleep(30)
+            if conn not in clients: break
+            if time.time() - clients[conn]["last_pong"] > TIMEOUT_LIMIT:
+                conn.close(); break
+            conn.send(f"PING|{time.time()}\n".encode('utf-8'))
+    except: pass
+
+def handle_client(conn, addr):
+    try:
+        # --- PHASE 1: HANDSHAKE ---
+        while True:
+            conn.send("ENTER_USERNAME\n".encode('utf-8'))
+            raw = conn.recv(1024).decode('utf-8')
+            if not raw: return
+            name = raw.strip()
+            if is_valid_id(name) and not any(i['name'].lower() == name.lower() for i in clients.values()):
+                clients[conn] = {"name": name, "rooms": {"#lobby"}, "active_room": "#lobby", "last_pong": time.time()}
+                conn.send(f"ACCEPT_NAME|{name}\n".encode('utf-8'))
+                broadcast(f"*** {name} joined #lobby ***", "#lobby")
+                threading.Thread(target=heartbeat, args=(conn,), daemon=True).start()
+                break
+            conn.send("[!] ERROR: Name taken or invalid.\n".encode('utf-8'))
+
+        # --- PHASE 2: COMMAND LOOP ---
+        while True:
+            raw = conn.recv(1024).decode('utf-8')
+            if not raw: break
+            data = raw.strip()
+            if not data: continue
+            if data.startswith("PONG|"):
+                if conn in clients: clients[conn]["last_pong"] = time.time()
+                continue
+            
+            if data.startswith("/"):
+                parts = data.split(" ", 1)
+                cmd = parts[0].lower()
+                arg = parts[1].strip() if len(parts) > 1 else ""
+                
+                # RESTORED HELP COMMAND
+                if cmd == "/help":
+                    conn.send(f"{HELP_TEXT}\n".encode('utf-8'))
+                
+                elif cmd == "/quit":
+                    break
+                
+                elif cmd == "/list":
+                    room_counts = {}
+                    for c_info in clients.values():
+                        for r in c_info["rooms"]:
+                            if r.startswith("#"): room_counts[r] = room_counts.get(r, 0) + 1
+                    list_str = "\n".join([f"  {r} ({count} users)" for r, count in room_counts.items()])
+                    conn.send(f"--- Active Channels ---\n{list_str if list_str else 'No public channels'}\n-----------------------\n".encode('utf-8'))
+
+                elif cmd == "/names":
+                    target = arg if arg else clients[conn]["active_room"]
+                    u_list = [i["name"] for i in clients.values() if target in i["rooms"]]
+                    if u_list: conn.send(f"--- Users in {target} ({len(u_list)}) ---\n{', '.join(u_list)}\n".encode('utf-8'))
+                    else: conn.send(f"[!] ERROR: '{target}' not found.\n".encode('utf-8'))
+
+                elif cmd == "/join" and arg:
+                    if arg != clients[conn]["name"]:
+                        is_chan = arg.startswith("#")
+                        exists = any(i['name'].lower() == arg.lower() for i in clients.values())
+                        if is_chan or exists:
+                            clients[conn]["rooms"].add(arg); clients[conn]["active_room"] = arg
+                            conn.send(f"JOIN_SUCCESS|{arg}\n[i] Switched to {arg}\n".encode('utf-8'))
+                            if is_chan: broadcast(f"*** {clients[conn]['name']} joined {arg} ***", arg)
+                        else: conn.send(f"[!] ERROR: {arg} not found.\n".encode('utf-8'))
+                
+                elif cmd == "/part":
+                    target = arg if arg else clients[conn]["active_room"]
+                    if target == "#lobby": conn.send("[!] ERROR: Cannot leave #lobby.\n".encode('utf-8'))
+                    elif target in clients[conn]["rooms"]:
+                        clients[conn]["rooms"].remove(target)
+                        broadcast(f"*** {clients[conn]['name']} left {target} ***", target)
+                        if clients[conn]["active_room"] == target:
+                            clients[conn]["active_room"] = "#lobby"
+                            conn.send(f"JOIN_SUCCESS|#lobby\n[i] Back in #lobby.\n".encode('utf-8'))
+                    else: conn.send(f"[!] ERROR: Not in {target}.\n".encode('utf-8'))
+
+                elif cmd == "/nick" and arg:
+                    if is_valid_id(arg) and not any(i['name'].lower() == arg.lower() for i in clients.values()):
+                        old = clients[conn]["name"]; clients[conn]["name"] = arg
+                        conn.send(f"NICK_SUCCESS|{arg}\n[i] Now known as {arg}.\n".encode('utf-8'))
+                        for r in clients[conn]["rooms"]: broadcast(f"*** {old} is now {arg} ***", r)
+                    else: conn.send("[!] ERROR: Name taken or invalid.\n".encode('utf-8'))
+            else:
+                room = clients[conn]["active_room"]
+                sender = clients[conn]["name"]
+                if room.startswith("#"): broadcast(f"<{room}> <{sender}>: {data}", room, conn)
+                else: broadcast(f"[PM from {sender}]: {data}", room, conn)
+    except: pass
+    finally:
+        if conn in clients:
+            u = clients[conn]
+            for r in u["rooms"]: 
+                if r.startswith("#"): broadcast(f"*** {u['name']} quit ***", r)
+            del clients[conn]
+        conn.close()
+
+def start_server():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((HOST, PORT)); s.listen(5)
+        print(f"[*] Server LIVE on {PORT} with /help restored.")
+    except Exception as e: print(f"BIND ERROR: {e}"); return
     while True:
-        try:
-            raw_data = sock.recv(2048).decode('utf-8')
-            if not raw_data: break
-            for data in raw_data.split('\n'):
-                if not data: continue
-                if data.startswith("PING|"):
-                    ts = float(data.split("|")[1])
-                    state.latency = int((time.time() - ts) * 1000)
-                    sock.send(f"PONG|{ts}\n".encode('utf-8'))
-                    continue
-                if data.startswith("NICK_SUCCESS|") or data.startswith("JOIN_SUCCESS|"):
-                    val = data.split("|")[1].strip()
-                    if data.startswith("NICK"): state.name = val
-                    else: state.room = val
-                    state.prompt = f"[{state.room}] {state.name}> "
-                    continue
-                if "ENTER_USERNAME" not in data:
-                    curr_y, _ = pad.getyx()
-                    at_bottom = pad_pos[0] >= curr_y - (h - 4)
-                    pad.addstr(f"{data}\n")
-                    if at_bottom:
-                        new_y, _ = pad.getyx()
-                        pad_pos[0] = max(0, new_y - (h - 4))
-                    pad.noutrefresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
-        except: break
-
-def get_input(win, state, history, pad, pad_pos, h, w):
-    input_str, h_idx, cursor_idx = "", len(history), 0
-    win.nodelay(True)
-    
-    while True:
-        max_view_width = w - len(state.prompt) - 2
-        offset = max(0, cursor_idx - max_view_width + 1)
-        display_part = input_str[offset : offset + max_view_width]
-        
-        pad.noutrefresh(pad_pos[0], 0, 0, 0, h - 4, w - 1)
-        win.erase(); win.border()
-        win.addstr(1, 1, state.prompt + display_part)
-        if state.latency > 0:
-            win.addstr(2, w - 10, f" {state.latency}ms ")
-        
-        win.move(1, len(state.prompt) + (cursor_idx - offset) + 1)
-        win.noutrefresh()
-        curses.doupdate()
-        
-        key = win.getch()
-        if key == -1:
-            time.sleep(0.01); continue
-        if key in (10, 13):
-            if input_str.strip(): history.append(input_str)
-            return input_str
-        elif key == curses.KEY_LEFT: cursor_idx = max(0, cursor_idx - 1)
-        elif key == curses.KEY_RIGHT: cursor_idx = min(len(input_str), cursor_idx + 1)
-        elif key == curses.KEY_HOME: cursor_idx = 0
-        elif key == curses.KEY_END: cursor_idx = len(input_str)
-        elif key == curses.KEY_UP and h_idx > 0:
-            h_idx -= 1; input_str = history[h_idx]; cursor_idx = len(input_str)
-        elif key == curses.KEY_DOWN:
-            if h_idx < len(history) - 1: h_idx += 1; input_str = history[h_idx]
-            else: h_idx = len(history); input_str = ""
-            cursor_idx = len(input_str)
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
-            if cursor_idx > 0:
-                input_str = input_str[:cursor_idx-1] + input_str[cursor_idx:]
-                cursor_idx -= 1
-        elif key == curses.KEY_DC:
-            input_str = input_str[:cursor_idx] + input_str[cursor_idx+1:]
-        elif 32 <= key <= 126 and len(input_str) < MAX_INPUT_LENGTH:
-            input_str = input_str[:cursor_idx] + chr(key) + input_str[cursor_idx:]
-            cursor_idx += 1
-
-def main(stdscr):
-    curses.noecho(); stdscr.keypad(True); curses.curs_set(1)
-    h, w = stdscr.getmaxyx()
-    pad = curses.newpad(MAX_SCROLLBACK, w)
-    pad.scrollok(True); pad_pos = [0]
-    input_win = curses.newwin(3, w, h - 3, 0); input_win.keypad(True)
-    
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try: sock.connect((HOST, PORT))
-    except: return
-
-    # Handshake
-    data = sock.recv(1024).decode('utf-8')
-    if "ENTER_USERNAME" in data:
-        curses.echo(); input_win.clear(); input_win.border(); input_win.addstr(1, 1, "Username: ")
-        name = input_win.getstr(1, 11).decode('utf-8').strip()[:32]
-        sock.send(f"{name}\n".encode('utf-8')); curses.noecho()
-    name = sock.recv(1024).decode('utf-8').split("|")[1].strip()
-
-    state = UIState(name, "#lobby"); history = []
-    threading.Thread(target=receive_messages, args=(sock, pad, pad_pos, h, w, state), daemon=True).start()
-
-    while True:
-        msg = get_input(input_win, state, history, pad, pad_pos, h, w)
-        if not msg: continue
-        if not msg.startswith("/"):
-            lbl = f"<{state.room}> <{state.name}>" if state.room.startswith("#") else f"<To {state.room}>"
-            pad.addstr(f"{lbl}: {msg}\n")
-            cy, _ = pad.getyx(); pad_pos[0] = max(0, cy - (h - 4))
-        sock.send(f"{msg}\n".encode('utf-8'))
-        if msg.startswith("/quit"): break
+        c, a = s.accept()
+        threading.Thread(target=handle_client, args=(c, a), daemon=True).start()
 
 if __name__ == "__main__":
-    try: curses.wrapper(main)
-    except: pass
+    start_server()
